@@ -16,7 +16,7 @@ GYM_BASE_URL = 'https://codeforces.com/gym/'
 PROFILE_BASE_URL = 'https://codeforces.com/profile/'
 ACMSGURU_BASE_URL = 'https://codeforces.com/problemsets/acmsguru/'
 GYM_ID_THRESHOLD = 100000
-DEFAULT_RATING = 1500
+DEFAULT_RATING = 800
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,8 @@ RATED_RANKS = (
     Rank(2300, 2400, 'International Master', 'IM', '#FFBB55', 0xf57500),
     Rank(2400, 2600, 'Grandmaster', 'GM', '#FF7777', 0xff3030),
     Rank(2600, 3000, 'International Grandmaster', 'IGM', '#FF3333', 0xff0000),
-    Rank(3000, 10 ** 9, 'Legendary Grandmaster', 'LGM', '#AA0000', 0xcc0000)
+    Rank(3000, 4000, 'Legendary Grandmaster', 'LGM', '#AA0000', 0xcc0000),
+    Rank(4000, 10 ** 9, 'Tourist', 'T', '#330000', 0x000000)
 )
 UNRATED_RANK = Rank(None, None, 'Unrated', None, None, None)
 
@@ -140,7 +141,6 @@ class Problem(namedtuple('Problem', 'contestId problemsetName index name type po
             for tag in tags
         ]
 
-
 ProblemStatistics = namedtuple('ProblemStatistics', 'contestId index solvedCount')
 
 Submission = namedtuple('Submissions',
@@ -162,7 +162,7 @@ def make_from_dict(namedtuple_cls, dict_):
 class CodeforcesApiError(commands.CommandError):
     """Base class for all API related errors."""
     def __init__(self, message=None):
-        super().__init__(message or 'Codeforces API error')
+        super().__init__(message or 'Codeforces API error. There is nothing you or the Admins of the Discord server can do to fix it. We need to wait until Mike does his job.')
 
 
 class TrueApiError(CodeforcesApiError):
@@ -375,6 +375,7 @@ class user:
             f'will be chunkified into {len(chunks)} requests.')
 
         result = []
+        count = 0
         for chunk in chunks:
             params = {'handles': ';'.join(chunk)}
             try:
@@ -386,7 +387,28 @@ class user:
                     raise HandleNotFoundError(e.comment, handle)
                 raise
             result += [make_from_dict(User, user_dict) for user_dict in resp]
+            count += len(chunk)
+        logger.info(f"user.info was called for {count} entries and {len(result)} User objects could be created.")
         return [cf_common.fix_urls(user) for user in result]
+
+    @staticmethod
+    def correct_rating_changes(*, resp):
+        adaptO = [1400, 900, 550, 300, 150, 50]
+        adaptN = [900, 550, 300, 150, 50, 0]
+        for r in resp:
+            if (len(r) > 0):
+                if (r[0].newRating <= 1200):
+                    for ind in range(0,(min(6, len(r)))):
+                        r[ind] = RatingChange(r[ind].contestId, r[ind].contestName, r[ind].handle, r[ind].rank, r[ind].ratingUpdateTimeSeconds, r[ind].oldRating+adaptO[ind], r[ind].newRating+adaptN[ind])
+                else:
+                    r[0] = RatingChange(r[0].contestId, r[0].contestName, r[0].handle, r[0].rank, r[0].ratingUpdateTimeSeconds, r[0].oldRating+1500, r[0].newRating)
+        for r in resp:
+            oldPerf = 0
+            for ind in range(0,len(r)):
+                r[ind] = RatingChange(r[ind].contestId, r[ind].contestName, r[ind].handle, r[ind].rank, r[ind].ratingUpdateTimeSeconds, oldPerf, r[ind].oldRating + 4*(r[ind].newRating-r[ind].oldRating))
+                oldPerf = r[ind].oldRating + 4*(r[ind].newRating-r[ind].oldRating)
+        return resp
+
 
     @staticmethod
     async def rating(*, handle):
@@ -442,13 +464,14 @@ async def _needs_fixing(handles):
 
                 # Users could still have changed capitalization
                 for handle, cf_user in zip(handle_chunk, cf_users):
-                    assert handle.lower() == cf_user.handle.lower()
+                    assert handle.lower() == cf_user.handle.lower(),f"{handle.lower()} differs from {cf_user.handle.lower()}"
                     if handle != cf_user.handle:
                         to_fix.append(handle)
                 break
             except HandleNotFoundError as e:
                 to_fix.append(e.handle)
                 handle_chunk.remove(e.handle)
+            time.sleep(1)
     return to_fix
 
 
@@ -457,7 +480,7 @@ async def _resolve_redirect(handle):
     async with _session.head(url) as r:
         if r.status == 200:
             return handle
-        if r.status == 302:
+        if r.status == 301 or r.status == 302:
             redirected = r.headers.get('Location')
             if '/profile/' not in redirected:
                 # Ended up not on profile page, probably invalid handle
@@ -477,6 +500,7 @@ async def _resolve_handle_mapping(handles_to_fix):
         else:
             cf_user, = await user.info(handles=[new_handle])
             redirections[handle] = cf_user
+        time.sleep(1)
     return redirections
 
 
