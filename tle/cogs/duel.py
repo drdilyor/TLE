@@ -376,6 +376,113 @@ class Dueling(commands.Cog):
         embed.add_field(name='Rating', value=problem.rating)
         await ctx.send(f'Starting duel: {challenger.mention} vs {ctx.author.mention}', embed=embed)
     
+    @duel.command(brief='Start many duels, for a tournament round')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def _start_many(self, ctx, *players: discord.Member):
+
+        async def single_duel(p1: discord.Member, p2: discord.Member):
+            logger.info(f'{p1} {p2}')
+            challenger_id = p1.id
+            challengee_id = p2.id
+
+            await cf_common.resolve_handles(ctx, self.converter, ('!' + str(p1), '!' + str(p2)))
+            userids = [challenger_id, challengee_id]
+            handles = [cf_common.user_db.get_handle(
+                userid, ctx.guild.id) for userid in userids]
+            submissions = [await cf.user.status(handle=handle) for handle in handles]
+
+            if not cf_common.user_db.is_duelist(challenger_id, ctx.guild.id):
+                cf_common.user_db.register_duelist(challenger_id, ctx.guild.id)
+            if not cf_common.user_db.is_duelist(challengee_id, ctx.guild.id):
+                cf_common.user_db.register_duelist(challengee_id, ctx.guild.id)
+            if challenger_id == challengee_id:
+                raise DuelCogError(
+                    f'{p1.mention}, you cannot challenge yourself! ()')
+            if cf_common.user_db.check_duel_challenge(challenger_id, ctx.guild.id):
+                raise DuelCogError(
+                    f'{p1.mention}, you are currently in a duel! ()')
+            if cf_common.user_db.check_duel_challenge(challengee_id, ctx.guild.id):
+                raise DuelCogError(
+                    f'{p2.mention} is currently in a duel! ()')
+                    
+            tags = cf_common.parse_tags([], prefix='+')
+            bantags = cf_common.parse_tags([], prefix='~')
+            rating = cf_common.parse_rating([])
+            nohandicap = True
+            users = [cf_common.user_db.fetch_cf_user(handle) for handle in handles]
+            lowest_rating = min(user.effective_rating or 0 for user in users)
+            suggested_rating = round(lowest_rating, -2) + _DUEL_RATING_DELTA
+            rating = round(rating, -2) if rating else suggested_rating
+            rating = min(3500, max(rating, 800))
+            unofficial = rating > _DUEL_OFFICIAL_CUTOFF #suggested_rating 
+            if not nohandicap:
+                dtype = DuelType.ADJUNOFFICIAL if unofficial else DuelType.ADJOFFICIAL
+            else:
+                dtype = DuelType.UNOFFICIAL if unofficial else DuelType.OFFICIAL
+            
+            solved = {
+                sub.problem.name for subs in submissions for sub in subs if sub.verdict != 'COMPILATION_ERROR'}
+            seen = {name for userid in userids for name,
+                    in cf_common.user_db.get_duel_problem_names(userid, ctx.guild.id)} # maybe guild id is not needed here
+
+            def get_problems(rating):
+                return [prob for prob in cf_common.cache2.problem_cache.problems
+                        if prob.rating == rating and prob.name not in solved and prob.name not in seen
+                        and not any(cf_common.is_contest_writer(prob.contestId, handle) for handle in handles)
+                        and not cf_common.is_nonstandard_problem(prob)
+                        and prob.matches_all_tags(tags)
+                        and not prob.matches_any_tag(bantags)]
+
+            for problems in map(get_problems, range(rating, 400, -100)):
+                if problems:
+                    break
+
+            rstr = f'{rating} rated ' if rating else ''
+            if not problems:
+                raise DuelCogError(
+                    f'No unsolved {rstr}problems left for {p1.mention} vs {p2.mention}.')
+
+            problems.sort(key=lambda problem: cf_common.cache2.contest_cache.get_contest(
+                problem.contestId).startTimeSeconds)
+
+            choice = max(random.randrange(len(problems)) for _ in range(5))
+            problem = problems[choice]
+
+            issue_time = datetime.datetime.now().timestamp()
+            duelid = cf_common.user_db.create_duel(
+                challenger_id, challengee_id, issue_time, problem, dtype, ctx.guild.id)
+
+            ostr = 'an **unofficial**' if unofficial else 'a'
+            await ctx.send(f'{p1.mention} is challenging {p2.mention} to {ostr} {rstr}duel!')
+
+            active = cf_common.user_db.check_duel_accept(p2.id, ctx.guild.id)
+            if not active:
+                raise DuelCogError(
+                    f'{p2.mention}, you are not being challenged.')
+
+            duelid, challenger_id, name = active
+            challenger = ctx.guild.get_member(challenger_id)
+            await ctx.send(f'Duel between {p1.mention} and {p2.mention} starting in 15 seconds!')
+            await asyncio.sleep(15)
+
+            start_time = datetime.datetime.now().timestamp()
+            rc = cf_common.user_db.start_duel(duelid, ctx.guild.id, start_time)
+            if rc != 1:
+                raise DuelCogError(
+                    f'Unable to start the duel between {p1.mention} and {p2.mention}.')
+
+            problem = cf_common.cache2.problem_cache.problem_by_name[name]
+            title = f'{problem.index}. {problem.name}'
+            desc = cf_common.cache2.contest_cache.get_contest(
+                problem.contestId).name
+            embed = discord.Embed(title=title, url=problem.url, description=desc)
+            embed.add_field(name='Rating', value=problem.rating)
+            await ctx.send(f'Starting duel: {p1.mention} vs {p2.mention}', embed=embed)
+
+        a = await asyncio.gather(*(single_duel(p1, p2) for p1, p2 in zip(players[::2], players[1::2])))
+        await ctx.send(f'{len(a)} duels started')
+
+
     async def _get_solve_time(self, handle, contest_id, index):
         subs = [sub for sub in await cf.user.status(handle=handle)
                 if (sub.verdict == 'OK' or sub.verdict == 'TESTING')
