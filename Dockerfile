@@ -10,7 +10,7 @@ RUN python3.10 -m pip install poetry
 COPY ./poetry.lock ./poetry.lock
 COPY ./pyproject.toml ./pyproject.toml
 
-RUN python3.10 -m poetry install
+RUN python3.10 -m poetry install --no-root
 
 COPY . .
 
